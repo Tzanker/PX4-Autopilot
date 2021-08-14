@@ -1819,6 +1819,8 @@ Mavlink::configure_streams_to_default(const char *configure_single_stream)
 		configure_stream_local("GIMBAL_DEVICE_ATTITUDE_STATUS", 1.0f);
 		configure_stream_local("GIMBAL_MANAGER_STATUS", 0.5f);
 		configure_stream_local("GIMBAL_DEVICE_SET_ATTITUDE", 5.0f);
+		configure_stream_local("ESC_INFO", 1.0f);
+		configure_stream_local("ESC_STATUS", 5.0f);
 
 		configure_stream_local("ADSB_VEHICLE", unlimited_rate);
 		configure_stream_local("ATTITUDE_TARGET", 2.0f);
@@ -2379,6 +2381,7 @@ Mavlink::task_main(int argc, char *argv[])
 
 		/* send command ACK */
 		bool cmd_logging_start_acknowledgement = false;
+		bool cmd_logging_stop_acknowledgement = false;
 
 		if (_vehicle_command_ack_sub.updated()) {
 			static constexpr size_t COMMAND_ACK_TOTAL_LEN = MAVLINK_MSG_ID_COMMAND_ACK_LEN + MAVLINK_NUM_NON_PAYLOAD_BYTES;
@@ -2410,6 +2413,10 @@ Mavlink::task_main(int argc, char *argv[])
 
 						if (command_ack.command == vehicle_command_s::VEHICLE_CMD_LOGGING_START) {
 							cmd_logging_start_acknowledgement = true;
+
+						} else if (command_ack.command == vehicle_command_s::VEHICLE_CMD_LOGGING_STOP
+							   && command_ack.result == vehicle_command_ack_s::VEHICLE_RESULT_ACCEPTED) {
+							cmd_logging_stop_acknowledgement = true;
 						}
 					}
 				}
@@ -2451,10 +2458,9 @@ Mavlink::task_main(int argc, char *argv[])
 
 		/* check for ulog streaming messages */
 		if (_mavlink_ulog) {
-			if (_mavlink_ulog_stop_requested.load()) {
+			if (cmd_logging_stop_acknowledgement) {
 				_mavlink_ulog->stop();
 				_mavlink_ulog = nullptr;
-				_mavlink_ulog_stop_requested.store(false);
 
 			} else {
 				if (cmd_logging_start_acknowledgement) {

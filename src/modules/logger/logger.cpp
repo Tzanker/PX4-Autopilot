@@ -665,6 +665,8 @@ void Logger::run()
 		_lockstep_component = px4_lockstep_register_component();
 	}
 
+	bool was_started = false;
+
 	while (!should_exit()) {
 		// Start/stop logging (depending on logging mode, by default when arming/disarming)
 		const bool logging_started = start_stop_logging();
@@ -688,6 +690,10 @@ void Logger::run()
 		const hrt_abstime loop_time = hrt_absolute_time();
 
 		if (_writer.is_started(LogType::Full)) { // mission log only runs when full log is also started
+
+			if (!was_started) {
+				adjust_subscription_updates();
+			}
 
 			/* check if we need to output the process load */
 			if (_next_load_print != 0 && loop_time >= _next_load_print) {
@@ -835,6 +841,8 @@ void Logger::run()
 
 			debug_print_buffer(total_bytes, timer_start);
 
+			was_started = true;
+
 		} else { // not logging
 
 			// try to subscribe to new topics, even if we don't log, so that:
@@ -853,6 +861,8 @@ void Logger::run()
 			} else if (loop_time > next_subscribe_check) {
 				next_subscribe_topic_index = 0;
 			}
+
+			was_started = false;
 		}
 
 		update_params();
@@ -1025,6 +1035,26 @@ void Logger::publish_logger_status()
 	}
 }
 
+void Logger::adjust_subscription_updates()
+{
+	// we want subscriptions to update evenly distributed over time to avoid
+	// data bursts. This is particularly important for low-rate topics
+	hrt_abstime now = hrt_absolute_time();
+	int j = 0;
+
+	for (int i = 0; i < _num_subscriptions; ++i) {
+		if (_subscriptions[i].get_interval_us() >= 500_ms) {
+			hrt_abstime adjustment = (_log_interval * j) % 500_ms;
+
+			if (adjustment < now) {
+				_subscriptions[i].set_last_update(now - adjustment);
+			}
+
+			++j;
+		}
+	}
+}
+
 bool Logger::get_disable_boot_logging()
 {
 	if (_param_sdlog_boot_bat.get()) {
@@ -1124,7 +1154,11 @@ void Logger::handle_vehicle_command_update()
 			}
 
 		} else if (command.command == vehicle_command_s::VEHICLE_CMD_LOGGING_STOP) {
-			stop_log_mavlink();
+			if (_writer.is_started(LogType::Full, LogWriter::BackendMavlink)) {
+				ack_vehicle_command(&command, vehicle_command_s::VEHICLE_CMD_RESULT_IN_PROGRESS);
+				stop_log_mavlink();
+			}
+
 			ack_vehicle_command(&command, vehicle_command_s::VEHICLE_CMD_RESULT_ACCEPTED);
 		}
 	}
@@ -1363,6 +1397,10 @@ void Logger::start_log_mavlink()
 		return;
 	}
 
+	// mavlink log does not work in combination with lockstep, it leads to dead-locks
+	px4_lockstep_unregister_component(_lockstep_component);
+	_lockstep_component = -1;
+
 	// initialize cpu load as early as possible to get more data
 	initialize_load_output(PrintLoadReason::Preflight);
 
@@ -1382,13 +1420,24 @@ void Logger::start_log_mavlink()
 	_writer.set_need_reliable_transfer(false);
 	_writer.unselect_write_backend();
 	_writer.notify();
+
+	adjust_subscription_updates(); // redistribute updates as sending the header can take some time
 }
 
 void Logger::stop_log_mavlink()
 {
 	// don't write perf data since a client does not expect more data after a stop command
 	PX4_INFO("Stop mavlink log");
-	_writer.stop_log_mavlink();
+
+	if (_writer.is_started(LogType::Full, LogWriter::BackendMavlink)) {
+		_writer.select_write_backend(LogWriter::BackendMavlink);
+		_writer.set_need_reliable_transfer(true);
+		write_perf_data(false);
+		_writer.set_need_reliable_transfer(false);
+		_writer.unselect_write_backend();
+		_writer.notify();
+		_writer.stop_log_mavlink();
+	}
 }
 
 struct perf_callback_data_t {
