@@ -195,6 +195,7 @@
 
 #define DRV_GPS_DEVTYPE_SIM 0xAF
 
+#define DRV_ANGLE_DEVTYPE_A1335 0xB0
 
 #define DRV_DEVTYPE_UNUSED		0xff
 
